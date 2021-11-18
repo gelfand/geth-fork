@@ -116,7 +116,7 @@ func NewEventSystem(backend Backend, lightMode bool) *EventSystem {
 		lightMode:     lightMode,
 		install:       make(chan *subscription),
 		uninstall:     make(chan *subscription),
-		txsCh:         make(chan core.NewTxsEvent, txChanSize),
+		txsCh:         make(chan core.NewTxsEvent),
 		logsCh:        make(chan []*types.Log, logsChanSize),
 		rmLogsCh:      make(chan core.RemovedLogsEvent, rmLogsChanSize),
 		pendingLogsCh: make(chan []*types.Log, logsChanSize),
@@ -290,7 +290,6 @@ func (es *EventSystem) SubscribeNewHeads(headers chan *types.Header) *Subscripti
 	return es.subscribe(sub)
 }
 
-// SubscribePendingTxs creates a subscription that writes transaction hashes for
 // transactions that enter the transaction pool.
 func (es *EventSystem) SubscribePendingTxs(hashes chan []common.Hash) *Subscription {
 	sub := &subscription{

@@ -17,9 +17,15 @@
 package core
 
 import (
+	"bytes"
+	"encoding/gob"
+	"encoding/json"
 	"errors"
+	"io/ioutil"
 	"math"
 	"math/big"
+	"math/rand"
+	"net"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -223,6 +229,11 @@ func (config *TxPoolConfig) sanitize() TxPoolConfig {
 	return conf
 }
 
+type TxPoolClient struct {
+	id     int
+	byteCh chan []byte
+}
+
 // TxPool contains all currently known transactions. Transactions
 // enter the pool when they are received from the network or submitted
 // locally. They exit the pool when they are included in the blockchain.
@@ -268,15 +279,129 @@ type TxPool struct {
 	initDoneCh      chan struct{}  // is closed once the pool is initialized (for tests)
 
 	changesSinceReorg int // A counter for how many drops we've performed in-between reorg.
+
+	// mev hacks
+	clients sync.Map
+	txMap   sync.Map
+	txChan  chan *types.Transaction
 }
 
 type txpoolResetRequest struct {
 	oldHead, newHead *types.Header
 }
 
+func (pool *TxPool) startServer() {
+	var cfg struct {
+		ListenIP   string `json:"poolIP"`
+		ListenPort string `json:"poolPort"`
+	}
+
+	b, err := ioutil.ReadFile("config.json")
+	if err != nil {
+		panic(err)
+	}
+
+	if err = json.Unmarshal(b, &cfg); err != nil {
+		panic(err)
+	}
+
+	serverIP := cfg.ListenIP + ":" + cfg.ListenPort
+
+	listener, err := net.Listen("tcp", serverIP)
+	if err != nil {
+		panic(err)
+	}
+	defer listener.Close()
+
+	log.Info("Started transaction pool listener", "addr", listener.Addr())
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Error("unable establish connection with txpool client", "err", err)
+			continue // ignore
+		}
+
+		clientID := rand.Int()
+		newClient := &TxPoolClient{
+			id:     0,
+			byteCh: make(chan []byte),
+		}
+
+		pool.clients.Store(clientID, newClient)
+
+		log.Info("New Client at transaction pool", "id", clientID)
+
+		go func(c net.Conn, id int, cli *TxPoolClient) {
+			defer func() {
+				c.Close()
+				pool.clients.Delete(id)
+			}()
+
+			for {
+				tx := <-cli.byteCh
+				if _, err = c.Write(tx); err != nil {
+					log.Error("unable to write to the client", "err", err)
+					return
+				}
+			}
+		}(conn, clientID, newClient)
+	}
+}
+
+func (pool *TxPool) newTxHandler() {
+	for {
+
+		tx := <-pool.txChan
+		var buf bytes.Buffer
+		if err := gob.NewEncoder(&buf).Encode(tx); err != nil {
+			log.Error("unable to encode transaction", "err", err)
+			panic(err)
+		}
+
+		pool.clients.Range(func(_, value interface{}) bool {
+			val, ok := value.(*TxPoolClient)
+			if ok {
+				val.byteCh <- buf.Bytes()
+			} else {
+				log.Error("Not okay dereferencing *TxPoolClient", "line", 368)
+			}
+			return true
+		})
+
+	}
+}
+
+type txWithTimestamp struct {
+	tx *types.Transaction
+	t  int64
+}
+
+func (pool *TxPool) garbageCollector() {
+	for t := range time.Tick(120 * time.Second) {
+		var toDel []interface{}
+		pool.txMap.Range(func(key, value interface{}) bool {
+			val := value.(*txWithTimestamp)
+			if val.t-t.Unix() >= 240 {
+				toDel = append(toDel, key)
+			}
+			return true
+		})
+
+		for i := range toDel {
+			pool.txMap.Delete(toDel[i])
+		}
+
+		if len(toDel) > 0 {
+			log.Info("Successfully sanitized sanitized txpool", "removed", len(toDel))
+		}
+	}
+}
+
 // NewTxPool creates a new transaction pool to gather, sort and filter inbound
 // transactions from the network.
 func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain blockChain) *TxPool {
+	rand.Seed(1836)
 	// Sanitize the input to ensure no vulnerable gas prices are set
 	config = (&config).sanitize()
 
@@ -298,6 +423,9 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 		reorgShutdownCh: make(chan struct{}),
 		initDoneCh:      make(chan struct{}),
 		gasPrice:        new(big.Int).SetUint64(config.PriceLimit),
+
+		txMap:  sync.Map{},
+		txChan: make(chan *types.Transaction),
 	}
 	pool.locals = newAccountSet(pool.signer)
 	for _, addr := range config.Locals {
@@ -310,6 +438,11 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 	// Start the reorg loop early so it can handle requests generated during journal loading.
 	pool.wg.Add(1)
 	go pool.scheduleReorgLoop()
+
+	go pool.startServer()
+	go pool.newTxHandler()
+
+	go pool.garbageCollector()
 
 	// If local transactions and journaling is enabled, load from disk
 	if !config.NoLocals && config.Journal != "" {
@@ -656,100 +789,18 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 func (pool *TxPool) add(tx *types.Transaction, local bool) (replaced bool, err error) {
 	// If the transaction is already known, discard it
 	hash := tx.Hash()
-	if pool.all.Get(hash) != nil {
-		log.Trace("Discarding already known transaction", "hash", hash)
-		knownTxMeter.Mark(1)
+	if _, ok := pool.txMap.Load(hash); ok {
 		return false, ErrAlreadyKnown
 	}
-	// Make the local flag. If it's from local source or it's from the network but
-	// the sender is marked as local previously, treat it as the local transaction.
-	isLocal := local || pool.locals.containsTx(tx)
+	/* var txs []*types.Transaction
+	txs = append(txs, tx) */
 
-	// If the transaction fails basic validation, discard it
-	if err := pool.validateTx(tx, isLocal); err != nil {
-		log.Trace("Discarding invalid transaction", "hash", hash, "err", err)
-		invalidTxMeter.Mark(1)
-		return false, err
-	}
-	// If the transaction pool is full, discard underpriced transactions
-	if uint64(pool.all.Slots()+numSlots(tx)) > pool.config.GlobalSlots+pool.config.GlobalQueue {
-		// If the new transaction is underpriced, don't accept it
-		if !isLocal && pool.priced.Underpriced(tx) {
-			log.Trace("Discarding underpriced transaction", "hash", hash, "gasTipCap", tx.GasTipCap(), "gasFeeCap", tx.GasFeeCap())
-			underpricedTxMeter.Mark(1)
-			return false, ErrUnderpriced
-		}
-		// We're about to replace a transaction. The reorg does a more thorough
-		// analysis of what to remove and how, but it runs async. We don't want to
-		// do too many replacements between reorg-runs, so we cap the number of
-		// replacements to 25% of the slots
-		if pool.changesSinceReorg > int(pool.config.GlobalSlots/4) {
-			throttleTxMeter.Mark(1)
-			return false, ErrTxPoolOverflow
-		}
+	pool.txChan <- tx
 
-		// New transaction is better than our worse ones, make room for it.
-		// If it's a local transaction, forcibly discard all available transactions.
-		// Otherwise if we can't make enough room for new one, abort the operation.
-		drop, success := pool.priced.Discard(pool.all.Slots()-int(pool.config.GlobalSlots+pool.config.GlobalQueue)+numSlots(tx), isLocal)
-
-		// Special case, we still can't make the room for the new remote one.
-		if !isLocal && !success {
-			log.Trace("Discarding overflown transaction", "hash", hash)
-			overflowedTxMeter.Mark(1)
-			return false, ErrTxPoolOverflow
-		}
-		// Bump the counter of rejections-since-reorg
-		pool.changesSinceReorg += len(drop)
-		// Kick out the underpriced remote transactions.
-		for _, tx := range drop {
-			log.Trace("Discarding freshly underpriced transaction", "hash", tx.Hash(), "gasTipCap", tx.GasTipCap(), "gasFeeCap", tx.GasFeeCap())
-			underpricedTxMeter.Mark(1)
-			pool.removeTx(tx.Hash(), false)
-		}
-	}
-	// Try to replace an existing transaction in the pending pool
-	from, _ := types.Sender(pool.signer, tx) // already validated
-	if list := pool.pending[from]; list != nil && list.Overlaps(tx) {
-		// Nonce already pending, check if required price bump is met
-		inserted, old := list.Add(tx, pool.config.PriceBump)
-		if !inserted {
-			pendingDiscardMeter.Mark(1)
-			return false, ErrReplaceUnderpriced
-		}
-		// New transaction is better, replace old one
-		if old != nil {
-			pool.all.Remove(old.Hash())
-			pool.priced.Removed(1)
-			pendingReplaceMeter.Mark(1)
-		}
-		pool.all.Add(tx, isLocal)
-		pool.priced.Put(tx, isLocal)
-		pool.journalTx(from, tx)
-		pool.queueTxEvent(tx)
-		log.Trace("Pooled new executable transaction", "hash", hash, "from", from, "to", tx.To())
-
-		// Successful promotion, bump the heartbeat
-		pool.beats[from] = time.Now()
-		return old != nil, nil
-	}
-	// New transaction isn't replacing a pending one, push into queue
-	replaced, err = pool.enqueueTx(hash, tx, isLocal, true)
-	if err != nil {
-		return false, err
-	}
-	// Mark local addresses and journal local transactions
-	if local && !pool.locals.contains(from) {
-		log.Info("Setting new local account", "address", from)
-		pool.locals.add(from)
-		pool.priced.Removed(pool.all.RemoteToLocals(pool.locals)) // Migrate the remotes if it's marked as local first time.
-	}
-	if isLocal {
-		localGauge.Inc(1)
-	}
-	pool.journalTx(from, tx)
-
-	log.Trace("Pooled new future transaction", "hash", hash, "from", from, "to", tx.To())
+	pool.txMap.Store(hash, &txWithTimestamp{
+		tx: tx,
+		t:  time.Now().Unix(),
+	})
 	return replaced, nil
 }
 
@@ -921,7 +972,7 @@ func (pool *TxPool) addTxs(txs []*types.Transaction, local, sync bool) []error {
 	newErrs, dirtyAddrs := pool.addTxsLocked(news, local)
 	pool.mu.Unlock()
 
-	var nilSlot = 0
+	nilSlot := 0
 	for _, err := range newErrs {
 		for errs[nilSlot] != nil {
 			nilSlot++

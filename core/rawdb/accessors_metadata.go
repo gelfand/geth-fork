@@ -18,7 +18,6 @@ package rawdb
 
 import (
 	"encoding/json"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -95,7 +94,8 @@ const crashesToKeep = 10
 // - a list of timestamps
 // - a count of how many old unclean-shutdowns have been discarded
 func PushUncleanShutdownMarker(db ethdb.KeyValueStore) ([]uint64, uint64, error) {
-	var uncleanShutdowns crashList
+	return []uint64{}, uint64(0), nil
+	/* var uncleanShutdowns crashList
 	// Read old data
 	if data, err := db.Get(uncleanShutdownKey); err != nil {
 		log.Warn("Error reading unclean shutdown markers", "error", err)
@@ -118,7 +118,7 @@ func PushUncleanShutdownMarker(db ethdb.KeyValueStore) ([]uint64, uint64, error)
 		log.Warn("Failed to write unclean-shutdown marker", "err", err)
 		return nil, 0, err
 	}
-	return previous, discarded, nil
+	return previous, discarded, nil */
 }
 
 // PopUncleanShutdownMarker removes the last unclean shutdown marker

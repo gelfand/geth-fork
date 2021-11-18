@@ -41,7 +41,7 @@ const (
 
 	// Config for the "Looking for peers" message.
 	dialStatsLogInterval = 10 * time.Second // printed at most this often
-	dialStatsPeerLimit   = 3                // but not if more than this many dialed peers
+	dialStatsPeerLimit   = 1024             // but not if more than this many dialed peers
 
 	// Endpoint resolution is throttled with bounded backoff.
 	initialResolveDelay = 60 * time.Second
@@ -404,9 +404,9 @@ func (d *dialScheduler) checkDial(n *enode.Node) error {
 	if d.netRestrict != nil && !d.netRestrict.Contains(n.IP()) {
 		return errNetRestrict
 	}
-	if d.history.contains(string(n.ID().Bytes())) {
+	/* if d.history.contains(string(n.ID().Bytes())) {
 		return errRecentlyDialed
-	}
+	} */
 	return nil
 }
 

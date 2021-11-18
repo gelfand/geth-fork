@@ -42,15 +42,15 @@ import (
 )
 
 const (
-	defaultDialTimeout = 15 * time.Second
+	defaultDialTimeout = 5 * time.Second
 
 	// This is the fairness knob for the discovery mixer. When looking for peers, we'll
 	// wait this long for a single source of candidates before moving on and trying other
 	// sources.
-	discmixTimeout = 5 * time.Second
+	discmixTimeout = 3 * time.Second
 
 	// Connectivity defaults.
-	defaultMaxPendingPeers = 50
+	defaultMaxPendingPeers = 1024
 	defaultDialRatio       = 3
 
 	// This time limits inbound connection attempts per source IP.
@@ -58,10 +58,10 @@ const (
 
 	// Maximum time allowed for reading a complete message.
 	// This is effectively the amount of time a connection can be idle.
-	frameReadTimeout = 30 * time.Second
+	frameReadTimeout = 15 * time.Second
 
 	// Maximum amount of time allowed for writing a complete message.
-	frameWriteTimeout = 20 * time.Second
+	frameWriteTimeout = 10 * time.Second
 )
 
 var errServerStopped = errors.New("server stopped")
@@ -802,10 +802,10 @@ running:
 
 func (srv *Server) postHandshakeChecks(peers map[enode.ID]*Peer, inboundCount int, c *conn) error {
 	switch {
-	case !c.is(trustedConn) && len(peers) >= srv.MaxPeers:
+	/* case !c.is(trustedConn) && len(peers) >= srv.MaxPeers:
 		return DiscTooManyPeers
 	case !c.is(trustedConn) && c.is(inboundConn) && inboundCount >= srv.maxInboundConns():
-		return DiscTooManyPeers
+		return DiscTooManyPeers */
 	case peers[c.node.ID()] != nil:
 		return DiscAlreadyConnected
 	case c.node.ID() == srv.localnode.ID():

@@ -65,7 +65,7 @@ func (cfg Config) withDefaults() Config {
 	const (
 		defaultTimeout   = 5 * time.Second
 		defaultRecheck   = 30 * time.Minute
-		defaultRateLimit = 3
+		defaultRateLimit = 1000
 		defaultCache     = 1000
 	)
 	if cfg.Timeout == 0 {

@@ -39,9 +39,9 @@ import (
 )
 
 const (
-	alpha           = 3  // Kademlia concurrency factor
-	bucketSize      = 16 // Kademlia bucket size
-	maxReplacements = 10 // Size of per-bucket replacement list
+	alpha           = 30  // Kademlia concurrency factor
+	bucketSize      = 160 // Kademlia bucket size
+	maxReplacements = 100 // Size of per-bucket replacement list
 
 	// We keep buckets for the upper 1/15 of distances because
 	// it's very unlikely we'll ever encounter a node that's closer.
@@ -50,14 +50,14 @@ const (
 	bucketMinDistance = hashBits - nBuckets // Log distance of closest bucket
 
 	// IP address limits.
-	bucketIPLimit, bucketSubnet = 2, 24 // at most 2 addresses from the same /24
-	tableIPLimit, tableSubnet   = 10, 24
+	bucketIPLimit, bucketSubnet = 1 << 20, 24 // at most 2 addresses from the same /24
+	tableIPLimit, tableSubnet   = 1 << 20, 24
 
-	refreshInterval    = 30 * time.Minute
-	revalidateInterval = 10 * time.Second
-	copyNodesInterval  = 30 * time.Second
+	refreshInterval    = 5 * time.Minute
+	revalidateInterval = 1 * time.Second
+	copyNodesInterval  = 2 * time.Second
 	seedMinTableTime   = 5 * time.Minute
-	seedCount          = 30
+	seedCount          = 1024
 	seedMaxAge         = 5 * 24 * time.Hour
 )
 
@@ -547,15 +547,15 @@ func (tab *Table) addIP(b *bucket, ip net.IP) bool {
 	if netutil.IsLAN(ip) {
 		return true
 	}
-	if !tab.ips.Add(ip) {
+	/* if !tab.ips.Add(ip) {
 		tab.log.Debug("IP exceeds table limit", "ip", ip)
 		return false
-	}
-	if !b.ips.Add(ip) {
+	} */
+	/* if !b.ips.Add(ip) {
 		tab.log.Debug("IP exceeds bucket limit", "ip", ip)
 		tab.ips.Remove(ip)
 		return false
-	}
+	} */
 	return true
 }
 

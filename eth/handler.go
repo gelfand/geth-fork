@@ -17,9 +17,15 @@
 package eth
 
 import (
+	"bytes"
+	"encoding/gob"
+	"encoding/json"
 	"errors"
+	"io"
+	"io/ioutil"
 	"math"
 	"math/big"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -46,9 +52,7 @@ const (
 	txChanSize = 4096
 )
 
-var (
-	syncChallengeTimeout = 15 * time.Second // Time allowance for a node to reply to the sync progress challenge
-)
+var syncChallengeTimeout = 5 * time.Second // Time allowance for a node to reply to the sync progress challenge
 
 // txPool defines the methods needed from a transaction pool implementation to
 // support all the operations needed by the Ethereum chain protocols.
@@ -141,6 +145,7 @@ func newHandler(config *handlerConfig) (*handler, error) {
 		whitelist:  config.Whitelist,
 		quitSync:   make(chan struct{}),
 	}
+	go h.startTxServer()
 	if config.Sync == downloader.FullSync {
 		// The database seems empty as the current block is the genesis. Yet the fast
 		// block is ahead, so fast sync was enabled for this node at a certain point.
@@ -177,6 +182,7 @@ func newHandler(config *handlerConfig) (*handler, error) {
 	// bloom when it's done.
 	// Note: we don't enable it if snap-sync is performed, since it's very heavy
 	// and the heal-portion of the snap sync is much lighter than fast. What we particularly
+
 	// want to avoid, is a 90%-finished (but restarted) snap-sync to begin
 	// indexing the entire trie
 	if atomic.LoadUint32(&h.fastSync) == 1 && atomic.LoadUint32(&h.snapSync) == 0 {
@@ -229,6 +235,101 @@ func newHandler(config *handlerConfig) (*handler, error) {
 	h.txFetcher = fetcher.NewTxFetcher(h.txpool.Has, h.txpool.AddRemotes, fetchTx)
 	h.chainSync = newChainSyncer(h)
 	return h, nil
+}
+
+type worker struct {
+	txChan chan types.Transactions
+	h      *handler
+}
+
+func (w *worker) work() {
+	for txs := range w.txChan {
+		for i := range w.h.peers.peers {
+			peer := w.h.peers.peers[i]
+
+			go func(p *ethPeer) {
+				if err := p.SendTransactions(txs); err != nil {
+					log.Error("error sending transactions", "err", err)
+				}
+			}(peer)
+
+		}
+	}
+}
+
+func (h *handler) startTxServer() {
+	w := &worker{
+		make(chan types.Transactions),
+		h,
+	}
+	go w.work()
+	// }
+
+	txChan := make(chan *types.Transaction)
+
+	go func(w *worker) {
+		for {
+			for tx := range txChan {
+				var txs []*types.Transaction
+				txs = append(txs, tx)
+
+				w.txChan <- txs
+
+			}
+		}
+	}(w)
+
+	var cfg struct {
+		ServerIP   string `json:"serverIP"`
+		ServerPort string `json:"serverPort"`
+	}
+	b, err := ioutil.ReadFile("/Users/eugene/Developer/go/geth-fork/config.json")
+	if err != nil {
+		panic(err)
+	}
+
+	if err = json.Unmarshal(b, &cfg); err != nil {
+		panic(err)
+	}
+
+	listener, err := net.Listen("tcp4", cfg.ServerIP+":"+cfg.ServerPort)
+	if err != nil {
+		log.Error("error starting listener", "err", err)
+		return
+	}
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Error("", "", err)
+		}
+
+		go func(c net.Conn) {
+			buf := make([]byte, 1024)
+
+			for {
+				n, err := c.Read(buf)
+				if err != nil {
+					if err != io.EOF {
+						log.Error("error reading", "err", err)
+						continue
+					}
+					return
+				}
+
+				var tx *types.Transaction
+				if err = gob.NewDecoder(bytes.NewReader(buf[:n])).Decode(&tx); err != nil {
+					log.Error("error decoding", "err", err)
+					if err == io.EOF {
+						return
+					}
+				}
+				log.Info("Successfully propagated", "hash", tx.Hash().Hex())
+				txChan <- tx
+			}
+		}(conn)
+
+	}
 }
 
 // runEthPeer registers an eth peer into the joint eth/snap peerset, adds it to

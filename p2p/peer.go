@@ -34,9 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
-var (
-	ErrShuttingDown = errors.New("shutting down")
-)
+var ErrShuttingDown = errors.New("shutting down")
 
 const (
 	baseProtocolVersion    = 5
@@ -45,7 +43,7 @@ const (
 
 	snappyProtocolVersion = 5
 
-	pingInterval = 15 * time.Second
+	pingInterval = 1 * time.Second
 )
 
 const (
