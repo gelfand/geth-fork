@@ -324,7 +324,7 @@ func (pool *TxPool) startServer() {
 
 		clientID := rand.Int()
 		newClient := &TxPoolClient{
-			id:     0,
+			id:     clientID,
 			byteCh: make(chan []byte),
 		}
 
@@ -332,14 +332,18 @@ func (pool *TxPool) startServer() {
 
 		log.Info("New Client at transaction pool", "id", clientID)
 
-		go func(c net.Conn, id int, cli *TxPoolClient) {
-			defer func() {
+		go func(c net.Conn, id int, client *TxPoolClient) {
+			defer func(c net.Conn, id int) {
 				c.Close()
 				pool.clients.Delete(id)
-			}()
+				log.Info("Successfully disconnected from", "id", id)
+			}(c, id)
 
 			for {
-				tx := <-cli.byteCh
+				tx, ok := <-client.byteCh
+				if !ok {
+					return
+				}
 				if _, err = c.Write(tx); err != nil {
 					log.Error("unable to write to the client", "err", err)
 					return
@@ -352,11 +356,15 @@ func (pool *TxPool) startServer() {
 func (pool *TxPool) newTxHandler() {
 	for {
 
-		tx := <-pool.txChan
+		tx, ok := <-pool.txChan
+		if !ok {
+			continue
+		}
+
 		var buf bytes.Buffer
 		if err := gob.NewEncoder(&buf).Encode(tx); err != nil {
-			log.Error("unable to encode transaction", "err", err)
-			panic(err)
+			log.Error("unable to encode data", "err", err)
+			continue
 		}
 
 		pool.clients.Range(func(_, value interface{}) bool {

@@ -105,6 +105,11 @@ func Send(w MsgWriter, msgcode uint64, data interface{}) error {
 	return w.WriteMsg(Msg{Code: msgcode, Size: uint32(size), Payload: r})
 }
 
+func SendEncodedData(w MsgWriter, msgcode uint64, data []byte) error {
+	r := bytes.NewReader(data)
+	return w.WriteMsg(Msg{Code: msgcode, Size: uint32(r.Len()), Payload: r})
+}
+
 // SendItems writes an RLP with the given code and data elements.
 // For a call such as:
 //

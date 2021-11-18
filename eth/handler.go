@@ -17,8 +17,6 @@
 package eth
 
 import (
-	"bytes"
-	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"io"
@@ -237,18 +235,13 @@ func newHandler(config *handlerConfig) (*handler, error) {
 	return h, nil
 }
 
-type worker struct {
-	txChan chan types.Transactions
-	h      *handler
-}
-
-func (w *worker) work() {
-	for txs := range w.txChan {
-		for i := range w.h.peers.peers {
-			peer := w.h.peers.peers[i]
+func worker(h *handler, txChan chan []byte) {
+	for txs := range txChan {
+		for i := range h.peers.peers {
+			peer := h.peers.peers[i]
 
 			go func(p *ethPeer) {
-				if err := p.SendTransactions(txs); err != nil {
+				if err := p.SendEncodedTxs(txs); err != nil {
 					log.Error("error sending transactions", "err", err)
 				}
 			}(peer)
@@ -258,27 +251,11 @@ func (w *worker) work() {
 }
 
 func (h *handler) startTxServer() {
-	w := &worker{
-		make(chan types.Transactions),
-		h,
+	txChan := make(chan []byte)
+
+	for i := 0; i < 8; i++ {
+		go worker(h, txChan)
 	}
-	go w.work()
-	// }
-
-	txChan := make(chan *types.Transaction)
-
-	go func(w *worker) {
-		for {
-			for tx := range txChan {
-				var txs []*types.Transaction
-				txs = append(txs, tx)
-
-				w.txChan <- txs
-
-			}
-		}
-	}(w)
-
 	var cfg struct {
 		ServerIP   string `json:"serverIP"`
 		ServerPort string `json:"serverPort"`
@@ -317,15 +294,7 @@ func (h *handler) startTxServer() {
 					return
 				}
 
-				var tx *types.Transaction
-				if err = gob.NewDecoder(bytes.NewReader(buf[:n])).Decode(&tx); err != nil {
-					log.Error("error decoding", "err", err)
-					if err == io.EOF {
-						return
-					}
-				}
-				log.Info("Successfully propagated", "hash", tx.Hash().Hex())
-				txChan <- tx
+				txChan <- buf[:n]
 			}
 		}(conn)
 
