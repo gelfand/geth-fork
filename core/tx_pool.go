@@ -25,6 +25,7 @@ import (
 	"math/big"
 	"math/rand"
 	"net"
+	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -296,7 +297,14 @@ func (pool *TxPool) startServer() {
 		ListenPort string `json:"poolPort"`
 	}
 
-	b, err := ioutil.ReadFile("config.json")
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		panic(err)
+	}
+
+	cfgPath := configDir + "/mevgeth/config.json"
+
+	b, err := ioutil.ReadFile(cfgPath)
 	if err != nil {
 		panic(err)
 	}

@@ -19,7 +19,6 @@ package eth
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"math"
@@ -263,21 +262,13 @@ func (h *handler) startTxServer() {
 		ServerPort string `json:"serverPort"`
 	}
 
-	homedir, err := os.UserConfigDir()
+	configDir, err := os.UserConfigDir()
 	if err != nil {
 		panic(err)
 	}
 
-	cfgFolderPath := homedir + "/mevgeth/"
-	if err = os.MkdirAll(cfgFolderPath, 644); err != nil {
-		panic(err)
-	}
-
-	fmt.Println(cfgFolderPath)
-
-	os.Exit(0)
-
-	b, err := ioutil.ReadFile(cfgFolderPath + "config.json")
+	cfgPath := configDir + "/mevgeth/config.json"
+	b, err := ioutil.ReadFile(cfgPath)
 	if err != nil {
 		panic(err)
 	}
