@@ -282,8 +282,11 @@ func (h *handler) startTxServer() {
 		}
 
 		go func(c net.Conn) {
-			buf := make([]byte, 1024)
+			defer func() {
+				c.Close()
+			}()
 
+			buf := make([]byte, 1024)
 			for {
 				n, err := c.Read(buf)
 				if err != nil {

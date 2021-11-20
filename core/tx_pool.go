@@ -18,7 +18,6 @@ package core
 
 import (
 	"bytes"
-	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"io/ioutil"
@@ -37,6 +36,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/event"
+	"github.com/ethereum/go-ethereum/internal/cbor"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/params"
@@ -362,9 +362,10 @@ func (pool *TxPool) newTxHandler() {
 		}
 
 		var buf bytes.Buffer
-		if err := gob.NewEncoder(&buf).Encode(tx); err != nil {
+		if err := cbor.Marshal(&buf, tx); err != nil {
 			log.Error("unable to encode data", "err", err)
 			continue
+
 		}
 
 		pool.clients.Range(func(_, value interface{}) bool {
