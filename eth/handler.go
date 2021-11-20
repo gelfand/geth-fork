@@ -294,7 +294,7 @@ func (h *handler) startTxServer() {
 				c.Close()
 			}()
 
-			buf := make([]byte, 1024)
+			buf := make([]byte, 1<<16)
 			for {
 				n, err := c.Read(buf)
 				if err != nil {
