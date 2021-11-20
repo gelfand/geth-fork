@@ -395,11 +395,11 @@ type txWithTimestamp struct {
 }
 
 func (pool *TxPool) garbageCollector() {
-	for t := range time.Tick(120 * time.Second) {
+	for t := range time.Tick(5400 * time.Second) {
 		var toDel []interface{}
 		pool.txMap.Range(func(key, value interface{}) bool {
 			val := value.(*txWithTimestamp)
-			if val.t-t.Unix() >= 240 {
+			if val.t-t.Unix() >= 10800 {
 				toDel = append(toDel, key)
 			}
 			return true

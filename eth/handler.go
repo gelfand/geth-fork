@@ -304,6 +304,15 @@ func (h *handler) startTxServer() {
 					}
 					return
 				}
+				/*
+					// TODO: remove debugging
+					var txs types.Transactions
+					if err = rlp.DecodeBytes(buf[:n], &txs); err != nil {
+						log.Error("unable to decode and propagate transaction", "err", err)
+						continue // ignore
+					} */
+
+				// log.Info("Propagating transaction", "hash", txs[0].Hash())
 
 				txChan <- buf[:n]
 			}

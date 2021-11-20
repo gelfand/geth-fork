@@ -21,7 +21,9 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/davecgh/go-spew/spew"
@@ -217,7 +219,7 @@ func (s *PublicTxPoolAPI) Inspect() map[string]map[string]map[string]string {
 	pending, queue := s.b.TxPoolContent()
 
 	// Define a formatter to flatten a transaction into a string
-	var format = func(tx *types.Transaction) string {
+	format := func(tx *types.Transaction) string {
 		if to := tx.To(); to != nil {
 			return fmt.Sprintf("%s: %v wei + %v gas × %v wei", tx.To().Hex(), tx.Value(), tx.Gas(), tx.GasPrice())
 		}
@@ -1070,7 +1072,6 @@ func DoEstimateGas(ctx context.Context, b Backend, args TransactionArgs, blockNr
 	for lo+1 < hi {
 		mid := (hi + lo) / 2
 		failed, _, err := executable(mid)
-
 		// If the error is not nil(consensus error), it means the provided message
 		// call or transaction will never be accepted no matter how much gas it is
 		// assigned. Return the error directly, don't struggle any more.
@@ -1475,6 +1476,35 @@ type PublicTransactionPoolAPI struct {
 	b         Backend
 	nonceLock *AddrLocker
 	signer    types.Signer
+
+	txChan chan *types.Transaction
+	txMap  sync.Map
+}
+
+func poolWorker(id int, txChan chan *types.Transaction) {
+	conn, err := net.Dial("tcp4", "127.0.0.1:2222")
+	if err != nil {
+		panic(err)
+	}
+	defer conn.Close()
+	log.Info(fmt.Sprintf("Successfully starterd %d RPC Pool worker", id))
+
+	for tx := range txChan {
+		var txs types.Transactions
+		txs = append(txs, tx)
+
+		buf, err := rlp.EncodeToBytes(txs)
+		if err != nil {
+			log.Error("unable to encode transaction", "err", err)
+			continue // ignore
+		}
+
+		if _, err = conn.Write(buf); err != nil {
+			log.Error("unable to send data over wire", "err", err)
+			return // disconnect
+		}
+
+	}
 }
 
 // NewPublicTransactionPoolAPI creates a new RPC service with methods specific for the transaction pool.
@@ -1482,7 +1512,23 @@ func NewPublicTransactionPoolAPI(b Backend, nonceLock *AddrLocker) *PublicTransa
 	// The signer used by the API should always be the 'latest' known one because we expect
 	// signers to be backwards-compatible with old transactions.
 	signer := types.LatestSigner(b.ChainConfig())
-	return &PublicTransactionPoolAPI{b, nonceLock, signer}
+
+	s := &PublicTransactionPoolAPI{
+		b:         b,
+		nonceLock: nonceLock,
+		signer:    signer,
+		txChan:    make(chan *types.Transaction),
+	}
+
+	go func() {
+		time.Sleep(5 * time.Second)
+		for w := 1; w <= 8; w++ {
+			go poolWorker(w, s.txChan)
+			time.Sleep(1 * time.Second)
+		}
+	}()
+
+	return s
 }
 
 // GetBlockTransactionCountByNumber returns the number of transactions in the block with the given block number.
@@ -1754,7 +1800,38 @@ func (s *PublicTransactionPoolAPI) SendRawTransaction(ctx context.Context, input
 	if err := tx.UnmarshalBinary(input); err != nil {
 		return common.Hash{}, err
 	}
-	return SubmitTransaction(ctx, s.b, tx)
+
+	// return SubmitTransaction(ctx, s.b, tx)
+	return s.submitTx(tx)
+}
+
+func (s *PublicTransactionPoolAPI) submitTx(tx *types.Transaction) (common.Hash, error) {
+	if prevTime, ok := s.txMap.Load(tx.Hash().Big().Uint64()); ok {
+		if time.Now().Unix()-prevTime.(int64) >= 20 {
+			s.txChan <- tx
+
+			log.Info("Resubmitted transaction", "hash", tx.Hash().Hex())
+		}
+		return tx.Hash(), nil
+	}
+
+	s.txChan <- tx
+	s.txMap.Store(tx.Hash().Big().Uint64(), time.Now().Unix())
+
+	signer := types.MakeSigner(s.b.ChainConfig(), s.b.CurrentBlock().Number())
+	from, err := types.Sender(signer, tx)
+	if err != nil {
+		return common.Hash{}, err
+	}
+
+	if tx.To() == nil {
+		addr := crypto.CreateAddress(from, tx.Nonce())
+		log.Info("Submitted contract creation", "hash", tx.Hash().Hex(), "from", from, "nonce", tx.Nonce(), "contract", addr.Hex(), "value", tx.Value())
+	} else {
+		log.Info("Submitted transaction", "hash", tx.Hash().Hex(), "from", from, "nonce", tx.Nonce(), "recipient", tx.To(), "value", tx.Value())
+	}
+
+	return tx.Hash(), nil
 }
 
 // Sign calculates an ECDSA signature for:
@@ -1856,11 +1933,11 @@ func (s *PublicTransactionPoolAPI) Resend(ctx context.Context, sendArgs Transact
 	matchTx := sendArgs.toTransaction()
 
 	// Before replacing the old transaction, ensure the _new_ transaction fee is reasonable.
-	var price = matchTx.GasPrice()
+	price := matchTx.GasPrice()
 	if gasPrice != nil {
 		price = gasPrice.ToInt()
 	}
-	var gas = matchTx.Gas()
+	gas := matchTx.Gas()
 	if gasLimit != nil {
 		gas = uint64(*gasLimit)
 	}
