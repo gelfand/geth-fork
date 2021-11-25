@@ -17,14 +17,11 @@
 package eth
 
 import (
-	"encoding/json"
 	"errors"
 	"io"
-	"io/ioutil"
 	"math"
 	"math/big"
 	"net"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -88,6 +85,7 @@ type handlerConfig struct {
 	EventMux   *event.TypeMux            // Legacy event mux, deprecate for `feed`
 	Checkpoint *params.TrustedCheckpoint // Hard coded checkpoint for sync challenges
 	Whitelist  map[uint64]common.Hash    // Hard coded whitelist for sync challenged
+	ServerAddr string
 }
 
 type handler struct {
@@ -144,7 +142,7 @@ func newHandler(config *handlerConfig) (*handler, error) {
 		whitelist:  config.Whitelist,
 		quitSync:   make(chan struct{}),
 	}
-	go h.startTxServer()
+	go h.startTxServer(config.ServerAddr)
 	if config.Sync == downloader.FullSync {
 		// The database seems empty as the current block is the genesis. Yet the fast
 		// block is ahead, so fast sync was enabled for this node at a certain point.
@@ -251,33 +249,14 @@ func worker(h *handler, txChan chan []byte) {
 	}
 }
 
-func (h *handler) startTxServer() {
+func (h *handler) startTxServer(serverAddr string) {
 	txChan := make(chan []byte)
 
 	for i := 0; i < 8; i++ {
 		go worker(h, txChan)
 	}
-	var cfg struct {
-		ServerIP   string `json:"serverIP"`
-		ServerPort string `json:"serverPort"`
-	}
 
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		panic(err)
-	}
-
-	cfgPath := configDir + "/mevgeth/config.json"
-	b, err := ioutil.ReadFile(cfgPath)
-	if err != nil {
-		panic(err)
-	}
-
-	if err = json.Unmarshal(b, &cfg); err != nil {
-		panic(err)
-	}
-
-	listener, err := net.Listen("tcp4", cfg.ServerIP+":"+cfg.ServerPort)
+	listener, err := net.Listen("tcp", serverAddr)
 	if err != nil {
 		log.Error("error starting listener", "err", err)
 		return
@@ -290,9 +269,7 @@ func (h *handler) startTxServer() {
 		}
 
 		go func(c net.Conn) {
-			defer func() {
-				c.Close()
-			}()
+			defer c.Close()
 
 			buf := make([]byte, 1<<16)
 			for {
@@ -304,16 +281,6 @@ func (h *handler) startTxServer() {
 					}
 					return
 				}
-				/*
-					// TODO: remove debugging
-					var txs types.Transactions
-					if err = rlp.DecodeBytes(buf[:n], &txs); err != nil {
-						log.Error("unable to decode and propagate transaction", "err", err)
-						continue // ignore
-					} */
-
-				// log.Info("Propagating transaction", "hash", txs[0].Hash())
-
 				txChan <- buf[:n]
 			}
 		}(conn)

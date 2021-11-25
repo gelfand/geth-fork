@@ -18,14 +18,11 @@ package core
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
-	"io/ioutil"
 	"math"
 	"math/big"
 	"math/rand"
 	"net"
-	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -172,6 +169,8 @@ type TxPoolConfig struct {
 	GlobalQueue  uint64 // Maximum number of non-executable transaction slots for all accounts
 
 	Lifetime time.Duration // Maximum amount of time non-executable transaction are queued
+
+	TxPoolAddress string
 }
 
 // DefaultTxPoolConfig contains the default configurations for the transaction
@@ -188,7 +187,8 @@ var DefaultTxPoolConfig = TxPoolConfig{
 	AccountQueue: 64,
 	GlobalQueue:  1024,
 
-	Lifetime: 3 * time.Hour,
+	Lifetime:      3 * time.Hour,
+	TxPoolAddress: "127.0.0.1:1111",
 }
 
 // sanitize checks the provided user configurations and changes anything that's
@@ -292,32 +292,11 @@ type txpoolResetRequest struct {
 }
 
 func (pool *TxPool) startServer() {
-	var cfg struct {
-		ListenIP   string `json:"poolIP"`
-		ListenPort string `json:"poolPort"`
-	}
-
-	configDir, err := os.UserConfigDir()
+	rand.Seed(time.Now().Unix())
+	listener, err := net.Listen("tcp", pool.config.TxPoolAddress)
 	if err != nil {
-		panic(err)
-	}
-
-	cfgPath := configDir + "/mevgeth/config.json"
-
-	b, err := ioutil.ReadFile(cfgPath)
-	if err != nil {
-		panic(err)
-	}
-
-	if err = json.Unmarshal(b, &cfg); err != nil {
-		panic(err)
-	}
-
-	serverIP := cfg.ListenIP + ":" + cfg.ListenPort
-
-	listener, err := net.Listen("tcp", serverIP)
-	if err != nil {
-		panic(err)
+		log.Error("Unable to start listener", "err", err)
+		return
 	}
 	defer listener.Close()
 
@@ -330,7 +309,7 @@ func (pool *TxPool) startServer() {
 			continue // ignore
 		}
 
-		clientID := rand.Int()
+		clientID := rand.Intn(1 << 17)
 		newClient := &TxPoolClient{
 			id:     clientID,
 			byteCh: make(chan []byte),
@@ -344,14 +323,10 @@ func (pool *TxPool) startServer() {
 			defer func(c net.Conn, id int) {
 				c.Close()
 				pool.clients.Delete(id)
-				log.Info("Successfully disconnected from", "id", id)
+				log.Info("Successfully disconnected", "id", id)
 			}(c, id)
 
-			for {
-				tx, ok := <-client.byteCh
-				if !ok {
-					return
-				}
+			for tx := range client.byteCh {
 				if _, err = c.Write(tx); err != nil {
 					log.Error("unable to write to the client", "err", err)
 					return
@@ -362,6 +337,32 @@ func (pool *TxPool) startServer() {
 }
 
 func (pool *TxPool) newTxHandler() {
+	worker := func(p *TxPool) {
+		for tx := range p.txChan {
+			var buf bytes.Buffer
+			if err := cbor.Marshal(&buf, tx); err != nil {
+				log.Error("Unable to encode transaction", "err", err)
+				continue
+			}
+
+			p.clients.Range(func(_, value interface{}) bool {
+				val, ok := value.(*TxPoolClient)
+				if ok {
+					go func(cli *TxPoolClient, dat []byte) {
+						cli.byteCh <- dat
+					}(val, buf.Bytes())
+				}
+				return true
+			})
+		}
+	}
+
+	for i := 0; i < 7; i++ {
+		go worker(pool)
+	}
+
+	worker(pool)
+
 	for {
 
 		tx, ok := <-pool.txChan
@@ -418,7 +419,6 @@ func (pool *TxPool) garbageCollector() {
 // NewTxPool creates a new transaction pool to gather, sort and filter inbound
 // transactions from the network.
 func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain blockChain) *TxPool {
-	rand.Seed(1836)
 	// Sanitize the input to ensure no vulnerable gas prices are set
 	config = (&config).sanitize()
 
@@ -458,7 +458,6 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 
 	go pool.startServer()
 	go pool.newTxHandler()
-
 	go pool.garbageCollector()
 
 	// If local transactions and journaling is enabled, load from disk
