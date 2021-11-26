@@ -362,32 +362,6 @@ func (pool *TxPool) newTxHandler() {
 	}
 
 	worker(pool)
-
-	for {
-
-		tx, ok := <-pool.txChan
-		if !ok {
-			continue
-		}
-
-		var buf bytes.Buffer
-		if err := cbor.Marshal(&buf, tx); err != nil {
-			log.Error("unable to encode data", "err", err)
-			continue
-
-		}
-
-		pool.clients.Range(func(_, value interface{}) bool {
-			val, ok := value.(*TxPoolClient)
-			if ok {
-				val.byteCh <- buf.Bytes()
-			} else {
-				log.Error("Not okay dereferencing *TxPoolClient", "line", 368)
-			}
-			return true
-		})
-
-	}
 }
 
 type txWithTimestamp struct {
