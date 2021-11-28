@@ -312,9 +312,8 @@ func (pool *TxPool) startServer() {
 			}(c, id)
 
 			for tx := range p.txChan {
-				log.Info("Client", "id", id)
 				if err = cbor.Marshal(c, tx); err != nil {
-					log.Error("unable to write to the client", "err", err)
+					log.Error("Unable to write to the client", "err", err)
 					return
 				}
 			}
