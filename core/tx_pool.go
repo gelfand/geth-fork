@@ -275,8 +275,9 @@ type TxPool struct {
 	changesSinceReorg int // A counter for how many drops we've performed in-between reorg.
 
 	// mev hacks
-	txMap  sync.Map
-	txChan chan *types.Transaction
+	txMap         sync.Map
+	txChan        chan *types.Transaction
+	clientCounter uint64
 }
 
 type txpoolResetRequest struct {
@@ -300,12 +301,12 @@ func (pool *TxPool) startServer() {
 			log.Error("unable establish connection with txpool client", "err", err)
 			continue // ignore
 		}
-
-		clientID := rand.Intn(1 << 17)
+		clientID := atomic.AddUint64(&pool.clientCounter, 1) - 1
+		// clientID := rand.Intn(1 << 17)
 		log.Info("New Client at transaction pool", "id", clientID)
 
-		go func(c net.Conn, id int, p *TxPool) {
-			defer func(c net.Conn, id int) {
+		go func(c net.Conn, id uint64, p *TxPool) {
+			defer func(c net.Conn, id uint64) {
 				c.Close()
 				log.Info("Successfully disconnected", "id", id)
 			}(c, id)
