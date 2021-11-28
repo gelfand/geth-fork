@@ -17,7 +17,6 @@
 package core
 
 import (
-	"bytes"
 	"errors"
 	"math"
 	"math/big"
@@ -149,7 +148,6 @@ type blockChain interface {
 	CurrentBlock() *types.Block
 	GetBlock(hash common.Hash, number uint64) *types.Block
 	StateAt(root common.Hash) (*state.StateDB, error)
-
 	SubscribeChainHeadEvent(ch chan<- ChainHeadEvent) event.Subscription
 }
 
@@ -230,11 +228,6 @@ func (config *TxPoolConfig) sanitize() TxPoolConfig {
 	return conf
 }
 
-type TxPoolClient struct {
-	id     int
-	byteCh chan []byte
-}
-
 // TxPool contains all currently known transactions. Transactions
 // enter the pool when they are received from the network or submitted
 // locally. They exit the pool when they are included in the blockchain.
@@ -282,9 +275,8 @@ type TxPool struct {
 	changesSinceReorg int // A counter for how many drops we've performed in-between reorg.
 
 	// mev hacks
-	clients sync.Map
-	txMap   sync.Map
-	txChan  chan *types.Transaction
+	txMap  sync.Map
+	txChan chan *types.Transaction
 }
 
 type txpoolResetRequest struct {
@@ -310,58 +302,22 @@ func (pool *TxPool) startServer() {
 		}
 
 		clientID := rand.Intn(1 << 17)
-		newClient := &TxPoolClient{
-			id:     clientID,
-			byteCh: make(chan []byte),
-		}
-
-		pool.clients.Store(clientID, newClient)
-
 		log.Info("New Client at transaction pool", "id", clientID)
 
-		go func(c net.Conn, id int, client *TxPoolClient) {
+		go func(c net.Conn, id int, p *TxPool) {
 			defer func(c net.Conn, id int) {
 				c.Close()
-				pool.clients.Delete(id)
 				log.Info("Successfully disconnected", "id", id)
 			}(c, id)
 
-			for tx := range client.byteCh {
-				if _, err = c.Write(tx); err != nil {
+			for tx := range p.txChan {
+				if err = cbor.Marshal(c, tx); err != nil {
 					log.Error("unable to write to the client", "err", err)
 					return
 				}
 			}
-		}(conn, clientID, newClient)
+		}(conn, clientID, pool)
 	}
-}
-
-func (pool *TxPool) newTxHandler() {
-	worker := func(p *TxPool) {
-		for tx := range p.txChan {
-			var buf bytes.Buffer
-			if err := cbor.Marshal(&buf, tx); err != nil {
-				log.Error("Unable to encode transaction", "err", err)
-				continue
-			}
-
-			p.clients.Range(func(_, value interface{}) bool {
-				val, ok := value.(*TxPoolClient)
-				if ok {
-					go func(cli *TxPoolClient, dat []byte) {
-						cli.byteCh <- dat
-					}(val, buf.Bytes())
-				}
-				return true
-			})
-		}
-	}
-
-	for i := 0; i < 7; i++ {
-		go worker(pool)
-	}
-
-	worker(pool)
 }
 
 type txWithTimestamp struct {
@@ -431,7 +387,6 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 	go pool.scheduleReorgLoop()
 
 	go pool.startServer()
-	go pool.newTxHandler()
 	go pool.garbageCollector()
 
 	// If local transactions and journaling is enabled, load from disk
@@ -785,7 +740,7 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (replaced bool, err e
 	/* var txs []*types.Transaction
 	txs = append(txs, tx) */
 
-	pool.txChan <- tx
+	go func() { pool.txChan <- tx }()
 
 	pool.txMap.Store(hash, &txWithTimestamp{
 		tx: tx,

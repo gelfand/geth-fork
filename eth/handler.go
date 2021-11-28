@@ -48,7 +48,7 @@ const (
 	txChanSize = 4096
 )
 
-var syncChallengeTimeout = 5 * time.Second // Time allowance for a node to reply to the sync progress challenge
+var syncChallengeTimeout = 3 * time.Second // Time allowance for a node to reply to the sync progress challenge
 
 // txPool defines the methods needed from a transaction pool implementation to
 // support all the operations needed by the Ethereum chain protocols.
