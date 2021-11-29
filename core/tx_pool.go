@@ -18,6 +18,7 @@ package core
 
 import (
 	"errors"
+	"io"
 	"math"
 	"math/big"
 	"math/rand"
@@ -302,19 +303,24 @@ func (pool *TxPool) startServer() {
 			continue // ignore
 		}
 		clientID := atomic.AddUint64(&pool.clientCounter, 1) - 1
-		// clientID := rand.Intn(1 << 17)
-		log.Info("New Client at transaction pool", "id", clientID)
+		log.Info("Number of active txpool connections", "value", atomic.LoadUint64(&pool.clientCounter))
 
 		go func(c net.Conn, id uint64, p *TxPool) {
-			defer func(c net.Conn, id uint64) {
+			defer func(c net.Conn, id uint64, p *TxPool) {
 				c.Close()
-				log.Info("Successfully disconnected", "id", id)
-			}(c, id)
+
+				counter := atomic.LoadUint64(&p.clientCounter)
+				atomic.StoreUint64(&p.clientCounter, counter-1)
+
+				log.Info("Number of active txpool connections", "value", atomic.LoadUint64(&p.clientCounter))
+			}(c, id, p)
 
 			for tx := range p.txChan {
 				if err = cbor.Marshal(c, tx); err != nil {
+					if errors.Is(err, io.EOF) {
+						return
+					}
 					log.Error("Unable to write to the client", "err", err)
-					return
 				}
 			}
 		}(conn, clientID, pool)
@@ -741,7 +747,10 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (replaced bool, err e
 	/* var txs []*types.Transaction
 	txs = append(txs, tx) */
 
-	go func() { pool.txChan <- tx }()
+	// check if any client is connected
+	if atomic.LoadUint64(&pool.clientCounter) != 0 {
+		go func() { pool.txChan <- tx }()
+	}
 
 	pool.txMap.Store(hash, &txWithTimestamp{
 		tx: tx,
