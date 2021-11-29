@@ -748,9 +748,9 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (replaced bool, err e
 	txs = append(txs, tx) */
 
 	// check if any client is connected
-	if atomic.LoadUint64(&pool.clientCounter) != 0 {
-		go func() { pool.txChan <- tx }()
-	}
+	// if atomic.LoadUint64(&pool.clientCounter) != 0 {
+	go func() { pool.txChan <- tx }()
+	//}
 
 	pool.txMap.Store(hash, &txWithTimestamp{
 		tx: tx,
