@@ -18,7 +18,6 @@ package core
 
 import (
 	"errors"
-	"io"
 	"math"
 	"math/big"
 	"math/rand"
@@ -317,10 +316,8 @@ func (pool *TxPool) startServer() {
 
 			for tx := range p.txChan {
 				if err = cbor.Marshal(c, tx); err != nil {
-					if errors.Is(err, io.EOF) {
-						return
-					}
-					log.Error("Unable to write to the client", "err", err)
+					log.Error("Unable to write to the client, closing connection", "err", err)
+					return
 				}
 			}
 		}(conn, clientID, pool)
