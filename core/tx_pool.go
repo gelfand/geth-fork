@@ -510,6 +510,11 @@ func (pool *TxPool) Stop() {
 // SubscribeNewTxsEvent registers a subscription of NewTxsEvent and
 // starts sending event to the given channel.
 func (pool *TxPool) SubscribeNewTxsEvent(ch chan<- NewTxsEvent) event.Subscription {
+	go func(p *TxPool, txCh chan<- NewTxsEvent) {
+		for tx := range p.txChan {
+			ch <- NewTxsEvent{[]*types.Transaction{tx}}
+		}
+	}(pool, ch)
 	return pool.scope.Track(pool.txFeed.Subscribe(ch))
 }
 
