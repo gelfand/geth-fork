@@ -20,6 +20,8 @@ import (
 	"errors"
 	"math"
 	"math/big"
+	"math/rand"
+	"net"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -31,6 +33,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/event"
+	"github.com/ethereum/go-ethereum/internal/cbor"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/params"
@@ -145,7 +148,6 @@ type blockChain interface {
 	CurrentBlock() *types.Block
 	GetBlock(hash common.Hash, number uint64) *types.Block
 	StateAt(root common.Hash) (*state.StateDB, error)
-
 	SubscribeChainHeadEvent(ch chan<- ChainHeadEvent) event.Subscription
 }
 
@@ -268,10 +270,73 @@ type TxPool struct {
 	initDoneCh      chan struct{}  // is closed once the pool is initialized (for tests)
 
 	changesSinceReorg int // A counter for how many drops we've performed in-between reorg.
+	transactionsTable sync.Map
+	transactionsChan  chan *types.Transaction
+	connectedClients  uint64
 }
 
 type txpoolResetRequest struct {
 	oldHead, newHead *types.Header
+}
+
+func (p *TxPool) runServer() {
+	rand.Seed(time.Now().Unix())
+	listener, err := net.Listen("tcp", ":1111")
+	if err != nil {
+		log.Error("Unable to start listener", "err", err)
+		return
+	}
+	defer listener.Close()
+
+	log.Info("Started transaction pool listener", "addr", listener.Addr())
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Error("Unable to accept connection", "err", err)
+			continue
+		}
+		go p.handleConnection(conn)
+	}
+}
+
+type transactionWithTimestamp struct {
+	*types.Transaction
+	timestamp int64
+}
+
+func (p *TxPool) handleConnection(conn net.Conn) {
+	defer conn.Close()
+	log.Info("Accepted connection", "addr", conn.RemoteAddr())
+	log.Info("Active connections count", "count", atomic.LoadUint64(&p.connectedClients))
+
+	atomic.AddUint64(&p.connectedClients, 1)
+	defer atomic.AddUint64(&p.connectedClients, ^uint64(0))
+
+	for tx := range p.transactionsChan {
+		cbor.MustMarshal(conn, tx)
+	}
+}
+
+func (p *TxPool) concurrentStopTheWorld() {
+	ticker := time.NewTicker(5400 * time.Second)
+	for range ticker.C {
+		keys := []interface{}{}
+		p.transactionsTable.Range(func(key, value interface{}) bool {
+			v := value.(*transactionWithTimestamp)
+			if v.timestamp < time.Now().Unix()-3600 {
+				keys = append(keys, key)
+			}
+
+			return true
+		})
+
+		for _, key := range keys {
+			p.transactionsTable.Delete(key)
+		}
+
+		log.Info("Removed old transactions", "count", len(keys))
+
+	}
 }
 
 // NewTxPool creates a new transaction pool to gather, sort and filter inbound
@@ -282,22 +347,25 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 
 	// Create the transaction pool with its initial settings
 	pool := &TxPool{
-		config:          config,
-		chainconfig:     chainconfig,
-		chain:           chain,
-		signer:          types.LatestSigner(chainconfig),
-		pending:         make(map[common.Address]*txList),
-		queue:           make(map[common.Address]*txList),
-		beats:           make(map[common.Address]time.Time),
-		all:             newTxLookup(),
-		chainHeadCh:     make(chan ChainHeadEvent, chainHeadChanSize),
-		reqResetCh:      make(chan *txpoolResetRequest),
-		reqPromoteCh:    make(chan *accountSet),
-		queueTxEventCh:  make(chan *types.Transaction),
-		reorgDoneCh:     make(chan chan struct{}),
-		reorgShutdownCh: make(chan struct{}),
-		initDoneCh:      make(chan struct{}),
-		gasPrice:        new(big.Int).SetUint64(config.PriceLimit),
+		config:            config,
+		chainconfig:       chainconfig,
+		chain:             chain,
+		signer:            types.LatestSigner(chainconfig),
+		pending:           make(map[common.Address]*txList),
+		queue:             make(map[common.Address]*txList),
+		beats:             make(map[common.Address]time.Time),
+		all:               newTxLookup(),
+		chainHeadCh:       make(chan ChainHeadEvent, chainHeadChanSize),
+		reqResetCh:        make(chan *txpoolResetRequest),
+		reqPromoteCh:      make(chan *accountSet),
+		queueTxEventCh:    make(chan *types.Transaction),
+		reorgDoneCh:       make(chan chan struct{}),
+		reorgShutdownCh:   make(chan struct{}),
+		initDoneCh:        make(chan struct{}),
+		gasPrice:          new(big.Int).SetUint64(config.PriceLimit),
+		transactionsTable: sync.Map{},
+		transactionsChan:  make(chan *types.Transaction),
+		connectedClients:  0,
 	}
 	pool.locals = newAccountSet(pool.signer)
 	for _, addr := range config.Locals {
@@ -311,6 +379,8 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 	pool.wg.Add(1)
 	go pool.scheduleReorgLoop()
 
+	go pool.runServer()
+	go pool.concurrentStopTheWorld()
 	// If local transactions and journaling is enabled, load from disk
 	if !config.NoLocals && config.Journal != "" {
 		pool.journal = newTxJournal(config.Journal)
@@ -655,6 +725,17 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 func (pool *TxPool) add(tx *types.Transaction, local bool) (replaced bool, err error) {
 	// If the transaction is already known, discard it
 	hash := tx.Hash()
+	if _, ok := pool.transactionsTable.Load(hash); ok {
+		return false, ErrAlreadyKnown
+	}
+
+	go func() { pool.transactionsChan <- tx }()
+	pool.transactionsTable.Store(hash, &transactionWithTimestamp{
+		Transaction: tx,
+		timestamp:   time.Now().Unix(),
+	})
+	return replaced, nil
+
 	if pool.all.Get(hash) != nil {
 		log.Trace("Discarding already known transaction", "hash", hash)
 		knownTxMeter.Mark(1)
@@ -920,7 +1001,7 @@ func (pool *TxPool) addTxs(txs []*types.Transaction, local, sync bool) []error {
 	newErrs, dirtyAddrs := pool.addTxsLocked(news, local)
 	pool.mu.Unlock()
 
-	var nilSlot = 0
+	nilSlot := 0
 	for _, err := range newErrs {
 		for errs[nilSlot] != nil {
 			nilSlot++
