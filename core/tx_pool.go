@@ -281,7 +281,7 @@ type txpoolResetRequest struct {
 
 func (p *TxPool) runServer() {
 	rand.Seed(time.Now().Unix())
-	listener, err := net.Listen("tcp", ":1111")
+	listener, err := net.Listen("tcp", "127.0.0.1:1111")
 	if err != nil {
 		log.Error("Unable to start listener", "err", err)
 		return
