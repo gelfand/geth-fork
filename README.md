@@ -1,3 +1,72 @@
+## TCP Socket
+
+# How to use
+
+```rs
+use ethers::types::{Address, Bytes, H256, U256, U64};
+use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Transaction {
+    pub hash: H256,
+    pub nonce: U256,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<Address>,
+    pub value: U256,
+    #[serde(rename = "gasPrice")]
+    pub gas_price: Option<U256>,
+    pub gas: U256,
+    pub input: Bytes,
+    pub v: U64,
+    pub r: U256,
+    pub s: U256,
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub transaction_type: Option<U64>,
+    #[serde(
+        rename = "maxPriorityFeePerGas",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_priority_fee_per_gas: Option<U256>,
+    #[serde(
+        rename = "maxFeePerGas",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_fee_per_gas: Option<U256>,
+    #[serde(rename = "chainId", default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<U256>,
+}
+
+impl Transaction {
+    /// Get a reference to the transaction's hash.
+    pub fn hash(&self) -> &H256 {
+        &self.hash
+    }
+}
+
+#[allow(unreachable_code)]
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut socket = tokio::net::TcpStream::connect("127.0.0.1:1111").await?;
+
+    loop {
+        socket.readable().await?;
+
+        let mut buf = vec![0; 8192];
+        let n = socket.read(&mut buf).await?;
+
+        match serde_json::from_slice::<Transaction>(&buf[..n]) {
+            Ok(transaction) => println!("{:?}", transaction),
+            _ => continue,
+        }
+    }
+
+    Ok(())
+}
+```
+
 ## Go Ethereum
 
 Official Golang implementation of the Ethereum protocol.
