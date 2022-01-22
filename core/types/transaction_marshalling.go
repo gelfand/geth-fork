@@ -41,7 +41,6 @@ type txJSON struct {
 	R                    *hexutil.Big    `json:"r"`
 	S                    *hexutil.Big    `json:"s"`
 	To                   *common.Address `json:"to"`
-	From                 common.Address  `json:"from"`
 
 	// Access list transaction fields:
 	ChainID    *hexutil.Big `json:"chainId,omitempty"`
@@ -57,12 +56,6 @@ func (t *Transaction) MarshalJSON() ([]byte, error) {
 	// These are set for all tx types.
 	enc.Hash = t.Hash()
 	enc.Type = hexutil.Uint64(t.Type())
-	from, ok := t.from.Load().(common.Address)
-	if ok {
-		enc.From = from
-	} else {
-		enc.From = common.Address{}
-	}
 
 	// Other fields are set conditionally depending on tx type.
 	switch tx := t.inner.(type) {
