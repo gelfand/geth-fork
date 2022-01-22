@@ -17,6 +17,7 @@
 package core
 
 import (
+	"encoding/json"
 	"errors"
 	"math"
 	"math/big"
@@ -33,7 +34,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/event"
-	"github.com/ethereum/go-ethereum/internal/cbor"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/params"
@@ -311,9 +311,13 @@ func (p *TxPool) handleConnection(conn net.Conn) {
 
 	atomic.AddUint64(&p.connectedClients, 1)
 	defer atomic.AddUint64(&p.connectedClients, ^uint64(0))
+	enc := json.NewEncoder(conn)
 
 	for tx := range p.transactionsChan {
-		cbor.MustMarshal(conn, tx)
+		if err := enc.Encode(tx); err != nil {
+			log.Info("Disconnecting from the client", "connections", atomic.LoadUint64(&p.connectedClients)-1)
+			return
+		}
 	}
 }
 
