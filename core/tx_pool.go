@@ -17,7 +17,7 @@
 package core
 
 import (
-	"encoding/json"
+	"encoding/binary"
 	"errors"
 	"math"
 	"math/big"
@@ -311,11 +311,19 @@ func (p *TxPool) handleConnection(conn net.Conn) {
 
 	atomic.AddUint64(&p.connectedClients, 1)
 	defer atomic.AddUint64(&p.connectedClients, ^uint64(0))
-	enc := json.NewEncoder(conn)
-
 	for tx := range p.transactionsChan {
-		if err := enc.Encode(tx); err != nil {
-			log.Info("Disconnecting from the client", "connections", atomic.LoadUint64(&p.connectedClients)-1)
+		data, err := tx.MarshalJSON()
+		if err != nil {
+			log.Error("Unable to marshal transaction", "err", err)
+			return
+		}
+		frameSize := len(data)
+		frameSizeBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(frameSizeBytes, uint32(frameSize))
+		data = append(frameSizeBytes, data...)
+		_, err = conn.Write(data)
+		if err != nil {
+			log.Error("Unable to write transaction", "err", err)
 			return
 		}
 	}
@@ -733,7 +741,9 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (replaced bool, err e
 		return false, ErrAlreadyKnown
 	}
 
-	go func() { pool.transactionsChan <- tx }()
+	go func() {
+		pool.transactionsChan <- tx
+	}()
 	pool.transactionsTable.Store(hash, &transactionWithTimestamp{
 		Transaction: tx,
 		timestamp:   time.Now().Unix(),

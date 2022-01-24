@@ -3,67 +3,36 @@
 # How to use
 
 ```rs
-use ethers::types::{Address, Bytes, H256, U256, U64};
-use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Transaction {
-    pub hash: H256,
-    pub nonce: U256,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub to: Option<Address>,
-    pub value: U256,
-    #[serde(rename = "gasPrice")]
-    pub gas_price: Option<U256>,
-    pub gas: U256,
-    pub input: Bytes,
-    pub v: U64,
-    pub r: U256,
-    pub s: U256,
-    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
-    pub transaction_type: Option<U64>,
-    #[serde(
-        rename = "maxPriorityFeePerGas",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub max_priority_fee_per_gas: Option<U256>,
-    #[serde(
-        rename = "maxFeePerGas",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub max_fee_per_gas: Option<U256>,
-    #[serde(rename = "chainId", default, skip_serializing_if = "Option::is_none")]
-    pub chain_id: Option<U256>,
-}
+use ethers::prelude::Transaction;
+use tokio::{io::AsyncReadExt, net::TcpSocket};
 
-impl Transaction {
-    /// Get a reference to the transaction's hash.
-    pub fn hash(&self) -> &H256 {
-        &self.hash
-    }
-}
-
-#[allow(unreachable_code)]
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut socket = tokio::net::TcpStream::connect("127.0.0.1:1111").await?;
-
+async fn main() {
+    let addr = "127.0.0.1:1111".parse().unwrap();
+    let socket = TcpSocket::new_v4().unwrap();
+    let mut stream = socket.connect(addr).await.unwrap();
     loop {
-        socket.readable().await?;
+        stream.readable().await.unwrap();
+        let mut buf = Vec::with_capacity(1024 * 1024);
+        let mut input_size = stream.read_buf(&mut buf).await.unwrap();
 
-        let mut buf = vec![0; 8192];
-        let n = socket.read(&mut buf).await?;
+        loop {
+            if input_size == 0 {
+                break;
+            }
+            let frame_size = u32::from_be_bytes(buf[0..4].try_into().unwrap()) + 4;
+            if frame_size > input_size as u32 {
+                break;
+            }
+            let transaction_data = buf[4..frame_size as usize].to_vec();
+            let txn = serde_json::from_slice::<Transaction>(&transaction_data).unwrap();
 
-        match serde_json::from_slice::<Transaction>(&buf[..n]) {
-            Ok(transaction) => println!("{:?}", transaction),
-            _ => continue,
+            println!("{:?}", txn);
+            buf = buf[frame_size as usize..].to_vec();
+            input_size -= frame_size as usize;
         }
     }
-
-    Ok(())
 }
 ```
 
