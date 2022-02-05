@@ -3,36 +3,79 @@
 # How to use
 
 ```rs
-
+use std::{
+    net::SocketAddr,
+    ops::{Deref, DerefMut},
+};
+use async_stream::stream;
 use ethers::prelude::Transaction;
-use tokio::{io::AsyncReadExt, net::TcpSocket};
+use futures::{Stream, StreamExt};
+use tokio::io::AsyncReadExt;
+use tokio::net::{TcpSocket, TcpStream};
 
-#[tokio::main]
-async fn main() {
-    let addr = "127.0.0.1:1111".parse().unwrap();
-    let socket = TcpSocket::new_v4().unwrap();
-    let mut stream = socket.connect(addr).await.unwrap();
-    loop {
-        stream.readable().await.unwrap();
-        let mut buf = Vec::with_capacity(1024 * 1024);
-        let mut input_size = stream.read_buf(&mut buf).await.unwrap();
+struct PubSub(TcpStream);
 
-        loop {
-            if input_size == 0 {
-                break;
-            }
-            let frame_size = u32::from_be_bytes(buf[0..4].try_into().unwrap()) + 4;
-            if frame_size > input_size as u32 {
-                break;
-            }
-            let transaction_data = buf[4..frame_size as usize].to_vec();
-            let txn = serde_json::from_slice::<Transaction>(&transaction_data).unwrap();
+impl Deref for PubSub {
+    type Target = TcpStream;
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl DerefMut for PubSub {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
-            println!("{:?}", txn);
-            buf = buf[frame_size as usize..].to_vec();
-            input_size -= frame_size as usize;
+impl PubSub {
+    pub async fn connect(addr: SocketAddr) -> Result<Self, std::io::Error> {
+        match addr {
+            SocketAddr::V4(v) => Ok(Self {
+                0: TcpSocket::new_v4()?.connect(v.into()).await?,
+            }),
+            SocketAddr::V6(v) => Ok(Self {
+                0: TcpSocket::new_v6()?.connect(v.into()).await?,
+            }),
         }
     }
+    pub fn subscribe(
+        mut self,
+    ) -> impl Stream<Item = Result<Transaction, Box<dyn std::error::Error>>> {
+        Box::pin(stream! {
+                loop {
+                    self.readable().await.unwrap();
+                    let mut buf = Vec::with_capacity(16384);
+                    let mut n = self.read_buf(&mut buf).await.unwrap() as u32;
+                    while n > 0 {
+                        let frame_size = u32::from_be_bytes(buf[0..4].try_into().unwrap());
+                        if frame_size > n {
+                            break;
+                        }
+
+                        let transaction_data = buf[4..frame_size as usize].to_vec();
+                        yield Ok(serde_json::from_slice::<Transaction>(&transaction_data).unwrap());
+                        buf.drain(..frame_size as usize);
+                        n -= frame_size;
+                    }
+                }
+        })
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let addr = "127.0.0.1:1111".parse()?;
+    PubSub::connect(addr)
+        .await?
+        .subscribe()
+        .for_each(|r| async move {
+            println!("{:?}", r);
+        })
+        .await;
+
+    Ok(())
 }
 ```
 
