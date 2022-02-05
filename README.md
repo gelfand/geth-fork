@@ -3,13 +3,13 @@
 # How to use
 
 ```rs
+use async_stream::stream;
+use ethers::prelude::Transaction;
+use futures::{Stream, StreamExt};
 use std::{
     net::SocketAddr,
     ops::{Deref, DerefMut},
 };
-use async_stream::stream;
-use ethers::prelude::Transaction;
-use futures::{Stream, StreamExt};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpSocket, TcpStream};
 
@@ -40,43 +40,47 @@ impl PubSub {
             }),
         }
     }
-    pub fn subscribe(
-        mut self,
-    ) -> impl Stream<Item = Result<Transaction, Box<dyn std::error::Error>>> {
-        Box::pin(stream! {
-                loop {
-                    self.readable().await.unwrap();
-                    let mut buf = Vec::with_capacity(16384);
-                    let mut n = self.read_buf(&mut buf).await.unwrap() as u32;
-                    while n > 0 {
-                        let frame_size = u32::from_be_bytes(buf[0..4].try_into().unwrap());
-                        if frame_size > n {
-                            break;
-                        }
+    pub async fn subscribe(mut self) -> impl Stream<Item = Option<Transaction>> {
+        stream! {
+            loop {
+                self.readable().await.unwrap();
+                let mut buf = Vec::with_capacity(1024);
+                let mut n = self.read_buf(&mut buf).await.unwrap() as u32;
 
-                        let transaction_data = buf[4..frame_size as usize].to_vec();
-                        yield Ok(serde_json::from_slice::<Transaction>(&transaction_data).unwrap());
-                        buf.drain(..frame_size as usize);
-                        n -= frame_size;
+                while n > 4 {
+                    let frame_size = u32::from_be_bytes(buf[0..4].try_into().unwrap()) + 4;
+                    if frame_size > n {
+                        break
+                    }
+                    let transaction_data = buf[4..frame_size as usize].to_vec();
+
+                    buf = buf[frame_size as usize..].to_vec();
+                    n -= frame_size;
+                    match serde_json::from_slice::<Transaction>(&transaction_data) {
+                        Ok(transaction) => yield Some(transaction),
+                        _ => (),
                     }
                 }
-        })
+            }
+        }
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "127.0.0.1:1111".parse()?;
-    PubSub::connect(addr)
-        .await?
+    let client: PubSub = PubSub::connect(addr).await?;
+    client
         .subscribe()
-        .for_each(|r| async move {
-            println!("{:?}", r);
+        .await
+        .for_each(|tx| async move {
+            println!("{:?}", tx);
         })
         .await;
 
     Ok(())
 }
+
 ```
 
 ## Go Ethereum
